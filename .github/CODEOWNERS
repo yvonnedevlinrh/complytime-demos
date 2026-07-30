@@ -1,2 +1,45 @@
-# Default owners for everything in the repo.
+# =============================================================================
+# CODEOWNERS — complytime-demos
+# =============================================================================
+# This file defines code ownership for pull request review requirements.
+# When "Require review from Code Owners" is enabled in branch protection,
+# changes to owned files require approval from at least one listed owner.
+#
+# Syntax: last matching pattern wins. Patterns without owners remove the
+# code-owner review requirement for those paths.
+# Reference: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+# =============================================================================
+
+# Default: all files require review from an org maintainer.
 * @complytime/complytime-approvers @complytime/complytime-dev
+
+# -----------------------------------------------------------------------------
+# CI Consumer Workflows — org-infra managed
+# -----------------------------------------------------------------------------
+# These workflow files are synced from complytime/org-infra and contain only
+# version-pinned references to org-infra reusable workflows (uses: ...@vX.Y.Z).
+# Dependabot bumps these version pins when org-infra publishes a new release.
+#
+# WHY no code owner:
+#   Removing the code-owner requirement allows the ci_dependencies.yml
+#   pipeline to auto-merge org-owned dependabot PRs that pass all gates.
+#
+# SAFEGUARDS (enforced by ci_dependencies.yml + reusable_dependabot_reviewer):
+#   1. Only dependabot[bot] PRs are processed — GitHub App actor identity
+#      is verified and considered a trusted signal in the pipeline.
+#   2. Dependency review (vulnerability scan + OpenSSF Scorecard >= 5) must pass.
+#   3. Major version bumps are never auto-approved (risk_level == high).
+#   4. Auto-merge is restricted to org-owned dependencies only.
+#      Third-party dependencies may be auto-approved but are never auto-merged;
+#      a human must explicitly merge them.
+#   5. Branch protection still requires at least 1 approving review.
+#   6. All required status checks (CI, lint, tests) must pass before merge.
+#
+# SCOPE: Only PRs that exclusively modify these files skip code-owner review.
+#        PRs touching any other file still require code-owner approval.
+#
+# EXPERIMENT: This change is scoped to complytime-demos only for now.
+#             Results will be assessed before considering org-wide rollout.
+#             Tracking: https://github.com/complytime/org-infra
+# -----------------------------------------------------------------------------
+.github/workflows/ci_*.yml
