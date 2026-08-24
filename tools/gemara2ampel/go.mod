@@ -5,7 +5,7 @@ go 1.25.12
 require (
 	github.com/carabiner-dev/policy v0.5.2
 	github.com/carabiner-dev/signer v0.5.4
-	github.com/gemaraproj/go-gemara v0.9.0
+	github.com/gemaraproj/go-gemara v0.9.2
 	github.com/in-toto/attestation v1.2.0
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.11.1
