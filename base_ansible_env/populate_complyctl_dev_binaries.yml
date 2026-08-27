@@ -3,19 +3,30 @@
   hosts: demo_vm
   become: false
   vars:
-    # Update according to where https://github.com/complytime/complyctl.git was cloned
+    # Path to local clone of https://github.com/complytime/complyctl.git
+    # Override with: ansible-playbook -e complyctl_repo_dest=~/path/to/complyctl
     complyctl_repo_dest: "~/GIT/ProdSec/complyctl"
-    provider_dir: "~/.complytime/providers"
+    # Path to local clone of https://github.com/complytime/complytime-providers.git
+    # Override with: ansible-playbook -e providers_repo_dest=~/path/to/providers
+    providers_repo_dest: "~/GIT/ProdSec/complytime-providers"
+    # XDG-compliant user data directory for provider discovery
+    # complyctl searches this path with highest priority
+    provider_dir: "~/.local/share/complytime/providers"
     # Pin third-party tool versions to avoid breakage from upstream Go version bumps
-    snappy_version: "v0.1.4"
-    ampel_version: "v1.0.0"
+    # Keep in sync with populate_complyctl_dev_rpm.yml
+    snappy_version: "v0.2.6"
+    ampel_version: "v1.3.6"
+    conftest_version: "0.69.0"
 
   tasks:
     - name: "Ensure removal of packages from previous installation"
       ansible.builtin.dnf:
         name:
           - complyctl
-          - complyctl-openscap-plugin
+          - complytime-providers
+          - complytime-providers-openscap
+          - complytime-providers-ampel
+          - complytime-providers-opa
         state: absent
       become: true
 
@@ -24,6 +35,18 @@
         cmd: "make build"
         chdir: "{{ complyctl_repo_dest }}"
       delegate_to: localhost
+      changed_when: true
+      environment:
+        GOTOOLCHAIN: auto
+
+    - name: "Build complytime-providers locally"
+      ansible.builtin.command:
+        cmd: "make build"
+        chdir: "{{ providers_repo_dest }}"
+      delegate_to: localhost
+      changed_when: true
+      environment:
+        GOTOOLCHAIN: auto
 
     - name: "Ensure bin directory in home directory to make it easier to call complyctl"
       ansible.builtin.file:
@@ -45,20 +68,20 @@
 
     - name: "Copy OpenSCAP provider binary to Demo VM"
       ansible.builtin.copy:
-        src: "{{ complyctl_repo_dest }}/bin/openscap-plugin"
+        src: "{{ providers_repo_dest }}/bin/complyctl-provider-openscap"
         dest: "{{ provider_dir }}/complyctl-provider-openscap"
-        mode: "0750"
-
-    - name: "Copy mock-oci-registry binary to Demo VM"
-      ansible.builtin.copy:
-        src: "{{ complyctl_repo_dest }}/bin/mock-oci-registry"
-        dest: "~/bin/mock-oci-registry"
         mode: "0750"
 
     - name: "Copy AMPEL provider binary to Demo VM"
       ansible.builtin.copy:
-        src: "{{ complyctl_repo_dest }}/bin/ampel-plugin"
+        src: "{{ providers_repo_dest }}/bin/complyctl-provider-ampel"
         dest: "{{ provider_dir }}/complyctl-provider-ampel"
+        mode: "0750"
+
+    - name: "Copy OPA provider binary to Demo VM"
+      ansible.builtin.copy:
+        src: "{{ providers_repo_dest }}/bin/complyctl-provider-opa"
+        dest: "{{ provider_dir }}/complyctl-provider-opa"
         mode: "0750"
 
     - name: "Install snappy tool"
@@ -72,6 +95,21 @@
         cmd: "go install github.com/carabiner-dev/ampel/cmd/ampel@{{ ampel_version }}"
       environment:
         GOPATH: "{{ ansible_env.HOME }}/go"
+
+    - name: "Download conftest binary"
+      ansible.builtin.get_url:
+        url: "https://github.com/open-policy-agent/conftest/releases/download/v{{ conftest_version }}/conftest_{{ conftest_version }}_Linux_x86_64.tar.gz"
+        dest: "/tmp/conftest_{{ conftest_version }}.tar.gz"
+        mode: "0644"
+
+    - name: "Install conftest binary"
+      ansible.builtin.unarchive:
+        src: "/tmp/conftest_{{ conftest_version }}.tar.gz"
+        dest: "~/bin"
+        remote_src: true
+        include:
+          - conftest
+        mode: "0750"
 
     - name: "Ensure ~/go/bin is in PATH via .bashrc"
       ansible.builtin.lineinfile:
