@@ -1,24 +1,41 @@
 ---
-- name: "Prepare the environment and build complyctl RPMs in Fedora"
+- name: "Build complyctl and complytime-providers RPMs from local source"
   hosts: demo_vm
   become: false
   vars:
-    repo_org: "complytime"
-    repo_name: "complyctl"
-    spec_file: "complyctl.spec"
+    # Path to local clone of https://github.com/complytime/complyctl.git
+    # Override with: ansible-playbook -e complyctl_repo_dest=~/path/to/complyctl
+    complyctl_repo_dest: "~/GIT/ProdSec/complyctl"
+    # Path to local clone of https://github.com/complytime/complytime-providers.git
+    # Override with: ansible-playbook -e providers_repo_dest=~/path/to/providers
+    providers_repo_dest: "~/GIT/ProdSec/complytime-providers"
+    # Pin third-party tool versions to avoid breakage from upstream Go version bumps
+    # Keep in sync with populate_complyctl_dev_binaries.yml
+    snappy_version: "v0.2.6"
+    ampel_version: "v1.3.6"
+    conftest_version: "0.69.0"
+
   tasks:
+    # --- Cleanup previous installations ---
+
     - name: "Ensure removal of packages from previous installation"
       ansible.builtin.dnf:
         name:
           - complyctl
-          - complyctl-openscap-plugin
+          - complytime-providers
+          - complytime-providers-openscap
+          - complytime-providers-ampel
+          - complytime-providers-opa
         state: absent
       become: true
 
-    - name: "Install required packages to build complyctl RPMs"
+    # --- Install build dependencies on VM ---
+
+    - name: "Install required packages to build RPMs"
       ansible.builtin.dnf:
         name:
           - go-rpm-macros
+          - go-vendor-tools
           - golang
           - rpmdevtools
           - rpmlint
@@ -30,96 +47,313 @@
         cmd: "rpmdev-setuptree"
       changed_when: false
 
-    - name: "Get latest release info from GitHub repository"
-      ansible.builtin.uri:
-        url: "https://api.github.com/repos/{{ repo_org }}/{{ repo_name }}/releases/latest"
-        return_content: true
-      register: release_info
+    # --- Derive versions from local git tags ---
 
-    - name: "Set latest_version fact without leading 'v'"
-      ansible.builtin.set_fact:
-        latest_version: "{{ release_info.json.tag_name | regex_replace('^v', '') }}"
-
-    - name: "Clone or update repository"
-      ansible.builtin.git:
-        repo: "https://github.com/{{ repo_org }}/{{ repo_name }}.git"
-        dest: "{{ repo_name }}"
-        version: HEAD
-        update: true
-
-    - name: "Create tarball from git HEAD"
+    - name: "Get latest release git tag for complyctl from local repo"
       ansible.builtin.shell:
-        cmd: "set -o pipefail && git archive --format=tar --prefix={{ repo_name }}-{{ latest_version }}/ HEAD
-              | gzip > ~/rpmbuild/SOURCES/v{{ latest_version }}.tar.gz"
-        chdir: "{{ repo_name }}"
+        cmd: >-
+          set -o pipefail &&
+          git tag --merged HEAD --sort=-v:refname
+          | grep -v '-' | head -1
+        chdir: "{{ complyctl_repo_dest }}"
+        executable: /bin/bash
+      delegate_to: localhost
+      register: complyctl_tag_result
+      changed_when: false
+      failed_when: complyctl_tag_result.rc != 0
+
+    - name: "Verify complyctl has a reachable release tag"
+      ansible.builtin.assert:
+        that:
+          - complyctl_tag_result.stdout | trim != ''
+        fail_msg: >-
+          No release git tag reachable from HEAD in
+          {{ complyctl_repo_dest }}. Pre-release tags (e.g., v1.0.0-rc.0)
+          are excluded because RPM Version does not allow hyphens.
+          Create a release tag (e.g., 'git tag v1.0.0') before running
+          this playbook.
+
+    - name: "Set complyctl version fact"
+      ansible.builtin.set_fact:
+        complyctl_version: >-
+          {{ complyctl_tag_result.stdout | trim | regex_replace('^v', '') }}
+
+    - name: "Get latest release git tag for complytime-providers from local repo"
+      ansible.builtin.shell:
+        cmd: >-
+          set -o pipefail &&
+          git tag --merged HEAD --sort=-v:refname
+          | grep -v '-' | head -1
+        chdir: "{{ providers_repo_dest }}"
+        executable: /bin/bash
+      delegate_to: localhost
+      register: providers_tag_result
+      changed_when: false
+      failed_when: providers_tag_result.rc != 0
+
+    - name: "Verify complytime-providers has a reachable release tag"
+      ansible.builtin.assert:
+        that:
+          - providers_tag_result.stdout | trim != ''
+        fail_msg: >-
+          No release git tag reachable from HEAD in
+          {{ providers_repo_dest }}. Pre-release tags (e.g., v0.1.0-rc.1)
+          are excluded because RPM Version does not allow hyphens.
+          Create a release tag (e.g., 'git tag v0.1.0') before running
+          this playbook.
+
+    - name: "Set providers version fact"
+      ansible.builtin.set_fact:
+        providers_version: >-
+          {{ providers_tag_result.stdout | trim | regex_replace('^v', '') }}
+
+    - name: "Display derived versions"
+      ansible.builtin.debug:
+        msg: >-
+          complyctl={{ complyctl_version }},
+          complytime-providers={{ providers_version }}
+
+    # --- Archive and transfer complyctl source ---
+
+    - name: "Create complyctl tarball from local branch"
+      ansible.builtin.shell:
+        cmd: >-
+          set -o pipefail &&
+          git archive --format=tar
+          --prefix=complyctl-{{ complyctl_version }}/ HEAD
+          | gzip > /tmp/complyctl-{{ complyctl_version }}.tar.gz
+        chdir: "{{ complyctl_repo_dest }}"
+        executable: /bin/bash
+      delegate_to: localhost
+      changed_when: true
+
+    - name: "Copy complyctl tarball to VM"
+      ansible.builtin.copy:
+        src: "/tmp/complyctl-{{ complyctl_version }}.tar.gz"
+        dest: "~/complyctl-{{ complyctl_version }}.tar.gz"
+        mode: "0644"
+
+    - name: "Copy complyctl spec and go-vendor-tools config to VM"
+      ansible.builtin.copy:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        mode: "0640"
+      loop:
+        - src: "{{ complyctl_repo_dest }}/complyctl.spec"
+          dest: "~/complyctl.spec"
+        - src: "{{ complyctl_repo_dest }}/go-vendor-tools.toml"
+          dest: "~/complyctl-go-vendor-tools.toml"
+
+    - name: "Ensure complyctl spec file uses the derived version"
+      ansible.builtin.lineinfile:
+        path: "~/complyctl.spec"
+        regexp: "^Version:\\s*.*"
+        line: "Version:        {{ complyctl_version }}"
+
+    - name: "Generate complyctl vendor tarball with go_vendor_archive"
+      ansible.builtin.command:
+        cmd: >-
+          go_vendor_archive create
+          --config ~/complyctl-go-vendor-tools.toml
+          ~/complyctl.spec
+      register: complyctl_vendor_result
+      changed_when: true
+
+    - name: "Move complyctl tarballs to SOURCES"
+      ansible.builtin.shell:
+        cmd: >-
+          set -o pipefail &&
+          mv ~/complyctl-{{ complyctl_version }}.tar.gz
+          ~/complyctl-{{ complyctl_version }}-vendor.tar.bz2
+          ~/rpmbuild/SOURCES/
         executable: /bin/bash
       changed_when: true
 
-    - name: "Copy complyctl SPEC file from cloned repository"
-      ansible.builtin.copy:
-        src: "{{ repo_name }}/{{ spec_file }}"
-        dest: "{{ spec_file }}"
-        mode: "0640"
-        remote_src: true
+    # --- Archive and transfer complytime-providers source ---
 
-    - name: "Ensure complyctl SPEC file uses the latest released version"
-      ansible.builtin.lineinfile:
-        path: "{{ spec_file }}"
-        regexp: "^Version:\\s*.*"
-        line: "Version:        {{ latest_version }}"
-
-    - name: "Preamble check for the complyctl SPEC file"
-      ansible.builtin.command:
-        cmd: "rpmbuild -bp {{ spec_file }}"
-      register: result_preamble_check
-      changed_when: false
-
-    - name: "Show preamble check warnings and errors"
-      ansible.builtin.debug:
-        msg: "{{ result_preamble_check.stderr_lines | select('match', '^(warning|error)') | list }}"
+    - name: "Create complytime-providers tarball from local branch"
+      ansible.builtin.shell:
+        cmd: >-
+          set -o pipefail &&
+          git archive --format=tar
+          --prefix=complytime-providers-{{ providers_version }}/ HEAD
+          | gzip > /tmp/complytime-providers-{{ providers_version }}.tar.gz
+        chdir: "{{ providers_repo_dest }}"
+        executable: /bin/bash
+      delegate_to: localhost
       changed_when: true
-      when: result_preamble_check.stderr_lines | select('match', '^(warning|error)') | length > 0
 
-    - name: "Unmount tmpfs to avoid space issues during this build"
-      ansible.posix.mount:
-        path: /tmp
-        state: unmounted
-      become: true
+    - name: "Copy complytime-providers tarball to VM"
+      ansible.builtin.copy:
+        src: "/tmp/complytime-providers-{{ providers_version }}.tar.gz"
+        dest: "~/complytime-providers-{{ providers_version }}.tar.gz"
+        mode: "0644"
+
+    - name: "Copy complytime-providers spec and go-vendor-tools config to VM"
+      ansible.builtin.copy:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        mode: "0640"
+      loop:
+        - src: "{{ providers_repo_dest }}/complytime-providers.spec"
+          dest: "~/complytime-providers.spec"
+        - src: "{{ providers_repo_dest }}/go-vendor-tools.toml"
+          dest: "~/providers-go-vendor-tools.toml"
+
+    - name: "Ensure providers spec file uses the derived version"
+      ansible.builtin.lineinfile:
+        path: "~/complytime-providers.spec"
+        regexp: "^Version:\\s*.*"
+        line: "Version:        {{ providers_version }}"
+
+    - name: "Generate complytime-providers vendor tarball with go_vendor_archive"
+      ansible.builtin.command:
+        cmd: >-
+          go_vendor_archive create
+          --config ~/providers-go-vendor-tools.toml
+          ~/complytime-providers.spec
+      register: providers_vendor_result
+      changed_when: true
+
+    - name: "Move complytime-providers tarballs to SOURCES"
+      ansible.builtin.shell:
+        cmd: >-
+          set -o pipefail &&
+          mv ~/complytime-providers-{{ providers_version }}.tar.gz
+          ~/complytime-providers-{{ providers_version }}-vendor.tar.bz2
+          ~/rpmbuild/SOURCES/
+        executable: /bin/bash
+      changed_when: true
+
+    # --- Build RPMs on the VM ---
+    # The go-vendor-tools.toml config must be placed in SOURCES
+    # immediately before each rpmbuild, since both repos share the
+    # same SOURCES/go-vendor-tools.toml path (Source2 in the specs).
+
+    - name: "Place complyctl go-vendor-tools config in SOURCES"
+      ansible.builtin.copy:
+        src: "~/complyctl-go-vendor-tools.toml"
+        dest: "~/rpmbuild/SOURCES/go-vendor-tools.toml"
+        remote_src: true
+        mode: "0640"
 
     - name: "Build complyctl RPMs"
       ansible.builtin.command:
-        cmd: "rpmbuild -bb --nodebuginfo {{ spec_file }}"
-      register: result_build_all
+        cmd: "rpmbuild -bb --nodebuginfo ~/complyctl.spec"
+      register: result_build_complyctl
       changed_when: false
 
-    - name: "Show build process warnings and errors"
+    - name: "Show complyctl build warnings and errors"
       ansible.builtin.debug:
-        msg: "{{ result_build_all.stderr_lines | select('match', '^(warning|error)') | list }}"
-      changed_when: true
-      when: result_build_all.stderr_lines | select('match', '^(warning|error)') | length > 0
+        msg: >-
+          {{ result_build_complyctl.stderr_lines
+          | select('match', '^(warning|error)') | list }}
+      when: >-
+        result_build_complyctl.stderr_lines
+        | select('match', '^(warning|error)') | length > 0
 
-    - name: "Extract RPM paths from rpmbuild output"
+    - name: "Place providers go-vendor-tools config in SOURCES"
+      ansible.builtin.copy:
+        src: "~/providers-go-vendor-tools.toml"
+        dest: "~/rpmbuild/SOURCES/go-vendor-tools.toml"
+        remote_src: true
+        mode: "0640"
+
+    - name: "Build complytime-providers RPMs"
+      ansible.builtin.command:
+        cmd: >-
+          rpmbuild -bb --nodebuginfo ~/complytime-providers.spec
+      register: result_build_providers
+      changed_when: false
+
+    - name: "Show providers build warnings and errors"
+      ansible.builtin.debug:
+        msg: >-
+          {{ result_build_providers.stderr_lines
+          | select('match', '^(warning|error)') | list }}
+      when: >-
+        result_build_providers.stderr_lines
+        | select('match', '^(warning|error)') | length > 0
+
+    # --- Install all built RPMs ---
+
+    - name: "Extract RPM paths from complyctl build output"
       ansible.builtin.set_fact:
-        built_rpm_files: >-
-          {{ result_build_all.stdout_lines
-            | select('match', '.*\.rpm')
-            | map('regex_replace', '^Wrote: ', '')
-            | list }}
+        complyctl_rpms: >-
+          {{ result_build_complyctl.stdout_lines
+          | select('match', '.*\.rpm')
+          | map('regex_replace', '^Wrote: ', '')
+          | list }}
 
-    - name: "Install complyctl RPMs built locally"
+    - name: "Extract RPM paths from providers build output"
+      ansible.builtin.set_fact:
+        providers_rpms: >-
+          {{ result_build_providers.stdout_lines
+          | select('match', '.*\.rpm')
+          | map('regex_replace', '^Wrote: ', '')
+          | list }}
+
+    - name: "Verify RPM artifacts were found"
+      ansible.builtin.assert:
+        that:
+          - complyctl_rpms | length > 0
+          - providers_rpms | length > 0
+        fail_msg: >-
+          No RPM paths extracted from build output.
+          complyctl_rpms={{ complyctl_rpms }},
+          providers_rpms={{ providers_rpms }}.
+          Check rpmbuild output format.
+
+    - name: "Install all RPMs built locally"
       ansible.builtin.dnf:
-        name: "{{ built_rpm_files }}"
+        name: "{{ complyctl_rpms + providers_rpms }}"
         disable_gpg_check: true
         state: present
       become: true
 
-    - name: "Execute plan command to create Assessment Plan"
-      ansible.builtin.command:
-        cmd: "complyctl plan cusp_fedora"
-      changed_when: false
+    # --- Install provider runtime dependencies ---
 
-    - name: "Execute generate command to create policy and remediation"
+    - name: "Install snappy tool"
       ansible.builtin.command:
-        cmd: "complyctl generate"
-      changed_when: false
+        cmd: >-
+          go install
+          github.com/carabiner-dev/snappy@{{ snappy_version }}
+      environment:
+        GOPATH: "{{ ansible_env.HOME }}/go"
+
+    - name: "Install ampel tool"
+      ansible.builtin.command:
+        cmd: >-
+          go install
+          github.com/carabiner-dev/ampel/cmd/ampel@{{ ampel_version }}
+      environment:
+        GOPATH: "{{ ansible_env.HOME }}/go"
+
+    - name: "Ensure ~/bin directory exists"
+      ansible.builtin.file:
+        path: "~/bin"
+        state: directory
+        mode: "0750"
+
+    - name: "Download conftest binary"
+      ansible.builtin.get_url:
+        url: "https://github.com/open-policy-agent/conftest/releases/download/v{{ conftest_version }}/conftest_{{ conftest_version }}_Linux_x86_64.tar.gz"
+        dest: "/tmp/conftest_{{ conftest_version }}.tar.gz"
+        mode: "0644"
+
+    - name: "Install conftest binary"
+      ansible.builtin.unarchive:
+        src: "/tmp/conftest_{{ conftest_version }}.tar.gz"
+        dest: "~/bin"
+        remote_src: true
+        include:
+          - conftest
+        mode: "0750"
+
+    - name: "Ensure ~/go/bin and ~/bin are in PATH via .bashrc"
+      ansible.builtin.lineinfile:
+        path: "{{ ansible_env.HOME }}/.bashrc"
+        line: 'export PATH="$HOME/go/bin:$HOME/bin:$PATH"'
+        regexp: 'export PATH="\$HOME/go/bin'
+        state: present
 ...
