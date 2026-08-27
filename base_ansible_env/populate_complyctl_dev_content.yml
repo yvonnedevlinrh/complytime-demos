@@ -1,85 +1,83 @@
 ---
-- name: "Populate Demo VM with compliance policies via mock-oci-registry"
+- name: "Populate Demo VM with compliance policies from quay.io"
   hosts: demo_vm
   become: false
   vars:
     complyctl_workdir: "~/complyctl-demo"
-    registry_url: "http://localhost:8765"
-    openscap_policy_id: "cis-fedora"
-    openscap_profile: "cis_workstation_l1"
     ampel_policy_id: "ampel-bp"
     ampel_targets:
       - id: "complytime-demos"
         url: "https://github.com/complytime/complytime-demos"
         specs: "builtin:github/branch-rules.yaml"
+    # Branch or tag of org-infra to pull granular policies from
+    org_infra_ref: "main"
+    org_infra_policies_url: "https://raw.githubusercontent.com/complytime/org-infra"
+    # Uncomment to use a local clone of org-infra instead of downloading
+    # org_infra_local_path: "~/GIT/ProdSec/org-infra"
+    ampel_granular_policies:
+      - block-force-push.json
+      - minimum-approvals.json
+      - prevent-admin-bypass.json
+      - require-code-owner-review.json
+      - require-pull-request.json
 
   tasks:
-    - name: "Create working directory for complyctl demo"
+    - name: "Create complytime configuration directory"
       ansible.builtin.file:
-        path: "{{ complyctl_workdir }}"
+        path: "{{ complyctl_workdir }}/.complytime"
         state: directory
         mode: "0750"
 
     - name: "Create complytime.yaml configuration"
       ansible.builtin.template:
         src: complytime.yaml.j2
-        dest: "{{ complyctl_workdir }}/complytime.yaml"
+        dest: "{{ complyctl_workdir }}/.complytime/complytime.yaml"
         mode: "0640"
 
-    - name: "Start mock-oci-registry as a background process"
-      ansible.builtin.shell:
-        cmd: "nohup ~/bin/mock-oci-registry &"
-      async: 10
-      poll: 0
+    # --- Populate ampel granular policies from org-infra ---
 
-    - name: "Wait for mock-oci-registry to be ready"
-      ansible.builtin.uri:
-        url: "{{ registry_url }}/v2/"
-        method: GET
-        status_code: 200
-      register: registry_health
-      retries: 10
-      delay: 2
-      until: registry_health.status == 200
-
-    - name: "Fetch policies with complyctl get"
-      ansible.builtin.command:
-        cmd: "~/bin/complyctl get"
-        chdir: "{{ complyctl_workdir }}"
-
-    - name: "Validate OpenSCAP policy is available"
-      ansible.builtin.shell:
-        cmd: "~/bin/complyctl list | grep -q '{{ openscap_policy_id }}'"
-        chdir: "{{ complyctl_workdir }}"
-      register: result_openscap
-      changed_when: false
-      failed_when: result_openscap.rc != 0
-
-    - name: "Validate AMPEL policy is available"
-      ansible.builtin.shell:
-        cmd: "~/bin/complyctl list | grep -q '{{ ampel_policy_id }}'"
-        chdir: "{{ complyctl_workdir }}"
-      register: result_ampel
-      changed_when: false
-      failed_when: result_ampel.rc != 0
-
-    # --- AMPEL plugin workspace setup ---
-
-    - name: "Create AMPEL granular policy directory"
+    - name: "Create ampel granular policies directory"
       ansible.builtin.file:
         path: "{{ complyctl_workdir }}/.complytime/ampel/granular-policies"
         state: directory
         mode: "0750"
 
-    - name: "Copy AMPEL granular policy files"
-      ansible.builtin.copy:
-        src: "files/ampel-policies/"
-        dest: "{{ complyctl_workdir }}/.complytime/ampel/granular-policies/"
+    - name: "Download ampel granular policies from org-infra"
+      ansible.builtin.get_url:
+        url: "{{ org_infra_policies_url }}/{{ org_infra_ref }}/compliance/ampel/branch-protection/{{ item }}"
+        dest: "{{ complyctl_workdir }}/.complytime/ampel/granular-policies/{{ item }}"
         mode: "0644"
+      loop: "{{ ampel_granular_policies }}"
+      when: org_infra_local_path is not defined
+
+    - name: "Copy ampel granular policies from local org-infra clone"
+      ansible.builtin.copy:
+        src: "{{ org_infra_local_path }}/compliance/ampel/branch-protection/{{ item }}"
+        dest: "{{ complyctl_workdir }}/.complytime/ampel/granular-policies/{{ item }}"
+        mode: "0644"
+      loop: "{{ ampel_granular_policies }}"
+      when: org_infra_local_path is defined
+
+    # --- Fetch policies and validate ---
+
+    - name: "Fetch policies with complyctl get"
+      ansible.builtin.command:
+        cmd: "complyctl get"
+        chdir: "{{ complyctl_workdir }}"
+      changed_when: true
+
+    - name: "Validate AMPEL policy is available"
+      ansible.builtin.shell:
+        cmd: "complyctl list | grep -q '{{ ampel_policy_id }}'"
+        chdir: "{{ complyctl_workdir }}"
+        executable: /bin/bash
+      register: result_ampel
+      changed_when: false
+      failed_when: result_ampel.rc != 0
 
     - name: "Run complyctl doctor for workspace health check"
       ansible.builtin.command:
-        cmd: "~/bin/complyctl doctor"
+        cmd: "complyctl doctor"
         chdir: "{{ complyctl_workdir }}"
       register: result_doctor
       changed_when: false

@@ -1,3 +1,8 @@
+> **Historical Reference**: This document describes the previous
+> OSCAL-based content transformation workflow using complyscribe. It is
+> retained for reference. The current complyctl architecture uses Gemara
+> policies distributed as OCI artifacts via quay.io.
+
 ## Poetry Commands for transforming RHEL9 Profiles in CaC/content to OSCAL Content
 
 The commands for each RHEL9 Profile transform CaC/content to an OSCAL Catalog, Profile(s), and Component Definition(s).

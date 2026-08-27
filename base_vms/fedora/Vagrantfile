@@ -1,5 +1,5 @@
-# This Vagrant file will create a RHEL 9 VM using the libvirt provider.
-# It intended to be used only for local tests.
+# This Vagrant file will create a Fedora VM using the libvirt provider.
+# It is intended to be used only for local tests.
 
 Vagrant.configure("2") do |config|
   config.vm.provider "libvirt" do |libvirt|
@@ -7,13 +7,14 @@ Vagrant.configure("2") do |config|
     libvirt.cpus = 2
     libvirt.default_prefix = "complytime_"
     libvirt.machine_virtual_size = 10
+    libvirt.qemu_use_session = true
     libvirt.channel :type => 'unix', :target_name => 'org.qemu.guest_agent.0', :target_type => 'virtio'
   end
 
   config.vm.define "fedora" do |fedora|
-    fedora.vm.box_url  = "https://download.fedoraproject.org/pub/fedora/linux/releases/43/Cloud/x86_64/images/Fedora-Cloud-Base-Vagrant-libvirt-43-1.6.x86_64.vagrant.libvirt.box"
-    fedora.vm.box      = "f43-cloud-base"
-    fedora.vm.hostname = "fedora43"
+    fedora.vm.box_url  = "https://ftp.fau.de/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Vagrant-libvirt-44-1.7.x86_64.vagrant.libvirt.box"
+    fedora.vm.box      = "f44-cloud-base"
+    fedora.vm.hostname = "fedora44"
   end
 
   # This will collect the SSH public key used to access the VM. Update the path if needed.
